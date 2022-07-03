@@ -110,6 +110,9 @@ type ProviderSet struct {
 	// It includes all of the imported types.
 	providerMap *typeutil.Map
 
+	// originalOutputs is the original set of types produced by providers.
+	originalOutputs []types.Type
+
 	// srcMap maps from provided type to a *providerSetSrc capturing the
 	// Provider, Binding, Value, or Import that provided the type.
 	srcMap *typeutil.Map
@@ -122,10 +125,57 @@ func (set *ProviderSet) Outputs() []types.Type {
 }
 
 // For returns a ProvidedType for the given type, or the zero ProvidedType.
-func (set *ProviderSet) For(t types.Type) ProvidedType {
+func (set *ProviderSet) For(t types.Type, fsets ...*token.FileSet) ProvidedType {
 	pt := set.providerMap.At(t)
 	if pt == nil {
-		return ProvidedType{}
+		// if t is an interface, we try to find a provided type that implements it.
+		iface, ok := t.Underlying().(*types.Interface)
+		if !ok {
+			return ProvidedType{}
+		}
+
+		var pt *ProvidedType
+		impls := make(map[types.Type]*providerSetSrc)
+		for _, key := range set.originalOutputs {
+			if !types.Implements(key, iface) || impls[key] != nil {
+				continue
+			}
+
+			pt = set.providerMap.At(key).(*ProvidedType)
+			pss := &providerSetSrc{
+				Provider:    pt.p,
+				Value:       pt.v,
+				InjectorArg: pt.a,
+				Field:       pt.f,
+			}
+			impls[key] = pss
+
+			// cache
+			set.providerMap.Set(t, pt)
+			set.srcMap.Set(t, pss)
+		}
+
+		switch len(impls) {
+		case 0:
+			return ProvidedType{}
+		case 1:
+			return *pt
+		default:
+			// TODO(RussellLuo): Add `wire.Unbind` to explicitly declare that a type does not provide an interface type.
+
+			err := new(strings.Builder)
+			fmt.Fprintf(err, "wire: multiple types implement the same interface %s", t)
+			for it, pss := range impls {
+				if len(fsets) > 0 {
+					fmt.Fprintf(err, "\n\t%s (provided by %s)", types.TypeString(it, nil), pss.description(fsets[0], it))
+				} else {
+					fmt.Fprintf(err, "\n\t%s", types.TypeString(it, nil))
+				}
+			}
+			fmt.Println(err.String())
+
+			return ProvidedType{}
+		}
 	}
 	return *pt.(*ProvidedType)
 }
@@ -629,6 +679,7 @@ func (oc *objectCache) processNewSet(info *types.Info, pkgPath string, call *ast
 	if len(errs) > 0 {
 		return nil, errs
 	}
+	pset.originalOutputs = pset.Outputs()
 	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
 		return nil, errs
 	}

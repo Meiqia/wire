@@ -123,7 +123,7 @@ dfs:
 			continue
 		}
 
-		pv := set.For(curr.t)
+		pv := set.For(curr.t, fset)
 		if pv.IsNil() {
 			if curr.from == nil {
 				ec.add(fmt.Errorf("no provider found for %s, output of injector", types.TypeString(curr.t, nil)))
